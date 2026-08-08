@@ -22,7 +22,7 @@ R"(
 	}
 
 //INSERT: OVERLAY_VERTEX_GRID
-	// Show vertex grids
+	// Show vertex grid
 	{
 		vec3 __pixel_pos = (INV_VIEW_MATRIX * vec4(VERTEX,1.0)).xyz;
 		vec3 __camera_pos = INV_VIEW_MATRIX[3].xyz;
@@ -48,59 +48,60 @@ R"(
 
 //INSERT: OVERLAY_CONTOURS_SETUP
 group_uniforms contour_lines;
-uniform float contour_interval: hint_range(0.25, 100.0, 0.001) = 1.0;
-uniform float contour_thickness : hint_range(0.0, 10.0, 0.001) = 1.0;
-uniform vec4 contour_color : source_color = vec4(.85, .85, .19, 1.);
+uniform vec4 contour_color : source_color = vec4(1., 1., 1., 0.5);
+uniform float contour_index_interval : hint_range(10.0, 500.0, 1.0) = 100.0;
+uniform float contour_index_dist  : hint_range(1024.0, 100000.0, 1.0) = 8192.0;
+uniform float contour_index_thickness : hint_range(0.0, 8.0, 0.001) = 2.;
+uniform float contour_far_opacity : hint_range(0.0, .333, 0.001) = 0.05;
+uniform float contour_inter_dist  : hint_range(200.0, 10000.0, 1.0) = 1536.0;
+uniform float contour_inter_thickness : hint_range(0.0, 4.0, 0.001) = 1.0;
+uniform float contour_half_dist  : hint_range(100.0, 5000.0, 1.0) = 512.0;
 group_uniforms;
 
-float fractal_contour_lines(float thickness, float interval, vec3 spatial_coords, vec3 normal, vec3 base_ddx, vec3 base_ddy, vec3 __camera_pos) {
-    float depth = max(log(length(spatial_coords - __camera_pos) / interval) * (1.0 / log2(2.0)) - 1.0, 1.0);
+// Single interval anti-aliased contour (returns ~0 on line, ~1 off line)
+float single_contour(float thickness, float interval, float y, float y_fwidth, float dist, vec3 w_normal) {
+	// Soft distance fall-off for thickness
+	// Near is full thickness, far is reduced opacity, which prevents distant major lines looking too thick
+	float dist_mod = mix(1.0, contour_far_opacity, smoothstep(80.0, contour_index_dist, dist));
+	thickness *= dist_mod;
 
-    float interval_a = interval * exp2(max(floor(depth) - 1.0, 1.0)) * 0.5;
-    float interval_b = interval * exp2(max(floor(depth), 1.0)) * 0.5;
-    float interval_c = interval * exp2(max(floor(depth + 0.5) - 1.0, 1.0)) * 0.5;
+	// Gentle slope thinning
+	float slope_mod = smoothstep(0.0, 0.15, clamp(w_normal.y, 0.0, 1.0));
+	thickness *= mix(0.25, 1.0, slope_mod);
 
-    float y = spatial_coords.y;
-    float y_fwidth = abs(base_ddx.y) + abs(base_ddy.y);
+	float mi = max(0.0, thickness - 1.0);
+	float ma = max(1.0, thickness);
+	float mx = max(0.0, 1.0 - thickness);
+	float inv = 1.0 / interval;
+	float f = abs(fract((y + interval * 0.5) * inv) - 0.5);
+	float df = y_fwidth * inv;
+	return clamp((f - df * mi) / (df * (ma - mi) + 1e-8), mx, 1.0);
+}
 
-    thickness *= smoothstep(0., 0.0125, clamp(1.0 - normal.y, 0., 1.));
-    float mi = max(0.0, thickness - 1.0);
-    float ma = max(1.0, thickness);
-    float mx = max(0.0, 1.0 - thickness);
-
-    // Line A
-    float inv_interval_a = 1.0 / interval_a;
-    float f_a = abs(fract((y + interval_a * 0.5) * inv_interval_a) - 0.5);
-    float df_a = y_fwidth * inv_interval_a;
-    float line_a = clamp((f_a - df_a * mi) / (df_a * (ma - mi)), mx, 1.0);
-
-    // Line B
-    float inv_interval_b = 1.0 / interval_b;
-    float f_b = abs(fract((y + interval_b * 0.5) * inv_interval_b) - 0.5);
-    float df_b = y_fwidth * inv_interval_b;
-    float line_b = clamp((f_b - df_b * mi) / (df_b * (ma - mi)), mx, 1.0);
-
-    // Line C
-    float inv_interval_c = 1.0 / interval_c;
-    float f_c = abs(fract((y + interval_c * 0.5) * inv_interval_c) - 0.5);
-    float df_c = y_fwidth * inv_interval_c;
-    float line_c = clamp((f_c - df_c * mi) / (df_c * (ma - mi)), mx, 1.0);
-
-    // Blend out
-    float p = fract(depth - 0.5);
-    float line = mix(mix(line_a, line_b, fract(depth)), line_c, (4.0 * p * (1.0 - p)));
-    return line;
+// Distance-based opacity with a minimum floor
+float contour_opacity(float dist, float fade_start, float fade_end, float min_op, float max_op) {
+	float t = smoothstep(fade_end, fade_start, dist); // 1 near → 0 far
+	return mix(min_op, max_op, t);
 }
 
 //INSERT: OVERLAY_CONTOURS_RENDER
 	// Show contour lines
 	{
-		vec3 __pixel_pos = (INV_VIEW_MATRIX * vec4(VERTEX,1.0)).xyz;
-		vec3 __camera_pos = INV_VIEW_MATRIX[3].xyz;
-		vec3 __base_ddx = dFdxCoarse(__pixel_pos);
-		vec3 __base_ddy = dFdyCoarse(__pixel_pos);
-		vec3 __w_normal = normalize(cross(__base_ddy, __base_ddx));
-		float __line = fractal_contour_lines(contour_thickness, contour_interval, __pixel_pos, __w_normal, __base_ddx, __base_ddy, __camera_pos);
-		ALBEDO = mix(ALBEDO, contour_color.rgb, (1.-__line) * contour_color.a);
+		float __y_fwidth = abs(base_ddx.y) + abs(base_ddy.y);
+		float __pixel_dist = length(v_vertex - v_camera_pos);
+
+		float __index_line = single_contour(contour_index_thickness, contour_index_interval, v_vertex.y, __y_fwidth, __pixel_dist, w_normal);
+		float __inter_line  = single_contour(contour_inter_thickness, contour_index_interval * .2, v_vertex.y, __y_fwidth, __pixel_dist, w_normal);
+		float __half_line  = single_contour(contour_inter_thickness, contour_index_interval * .1, v_vertex.y, __y_fwidth, __pixel_dist, w_normal);
+
+		float __inter_op  = contour_opacity(__pixel_dist, contour_half_dist,  contour_inter_dist,  0., 1.);
+		float __half_op  = contour_opacity(__pixel_dist, 0., contour_half_dist, 0., .5);
+		float __contrib = max(max(
+			(1.0 - __index_line), // index_op,
+			(1.0 - __inter_line)  * __inter_op),
+			(1.0 - __half_line)  * __half_op);
+
+		ALBEDO = mix(ALBEDO, contour_color.rgb, __contrib * contour_color.a);
 	}
+
 )"
