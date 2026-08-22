@@ -448,6 +448,12 @@ void Terrain3DCollision::update(const bool p_rebuild) {
 
 Error Terrain3DCollision::rebuild_regions(const TypedArray<Vector2i> &p_region_locations) {
 	const uint64_t started = Time::get_singleton()->get_ticks_usec();
+	uint64_t preflight_usec = 0;
+	uint64_t height_data_usec = 0;
+	uint64_t shape_staging_usec = 0;
+	uint64_t publication_usec = 0;
+	uint64_t verification_usec = 0;
+	uint64_t retirement_usec = 0;
 	if (_mode != FULL_GAME) {
 		return ERR_UNAVAILABLE;
 	}
@@ -486,6 +492,14 @@ Error Terrain3DCollision::rebuild_regions(const TypedArray<Vector2i> &p_region_l
 	if (normalized.empty()) {
 		_last_rebuilt_regions = TypedArray<Vector2i>();
 		_last_regional_rebuild_usec = 0;
+		_last_regional_rebuild_stage_usec = Dictionary();
+		_last_regional_rebuild_stage_usec["preflight"] = 0;
+		_last_regional_rebuild_stage_usec["height_data"] = 0;
+		_last_regional_rebuild_stage_usec["shape_staging"] = 0;
+		_last_regional_rebuild_stage_usec["publication"] = 0;
+		_last_regional_rebuild_stage_usec["verification"] = 0;
+		_last_regional_rebuild_stage_usec["retirement"] = 0;
+		_last_regional_rebuild_stage_usec["total"] = 0;
 		return OK;
 	}
 	if (active_locations != _full_game_region_locations) {
@@ -514,7 +528,9 @@ Error Terrain3DCollision::rebuild_regions(const TypedArray<Vector2i> &p_region_l
 	};
 	const int region_size = _terrain->get_region_size();
 	const real_t spacing = _terrain->get_vertex_spacing();
+	preflight_usec = Time::get_singleton()->get_ticks_usec() - started;
 	for (const Vector2i &location : normalized) {
+		uint64_t stage_started = Time::get_singleton()->get_ticks_usec();
 		const int slot = active_locations.find(location);
 		Ref<Terrain3DRegion> region = data->get_region(location);
 		if (slot < 0 || slot >= shape_count || region.is_null() || region->is_deleted()) {
@@ -527,6 +543,9 @@ Error Terrain3DCollision::rebuild_regions(const TypedArray<Vector2i> &p_region_l
 			free_staged();
 			return ERR_INVALID_DATA;
 		}
+		preflight_usec += Time::get_singleton()->get_ticks_usec() - stage_started;
+
+		stage_started = Time::get_singleton()->get_ticks_usec();
 		Dictionary shape_data = _get_shape_data(location * region_size, region_size);
 		const int expected_dimension = region_size + 1;
 		if (!shape_data.has("width") || !shape_data.has("depth") || !shape_data.has("heights") || !shape_data.has("xform") ||
@@ -553,7 +572,9 @@ Error Terrain3DCollision::rebuild_regions(const TypedArray<Vector2i> &p_region_l
 			free_staged();
 			return ERR_INVALID_DATA;
 		}
+		height_data_usec += Time::get_singleton()->get_ticks_usec() - stage_started;
 
+		stage_started = Time::get_singleton()->get_ticks_usec();
 		RID replacement = PS->heightmap_shape_create();
 		if (!replacement.is_valid()) {
 			free_staged();
@@ -566,6 +587,7 @@ Error Terrain3DCollision::rebuild_regions(const TypedArray<Vector2i> &p_region_l
 			free_staged();
 			return ERR_INVALID_DATA;
 		}
+		shape_staging_usec += Time::get_singleton()->get_ticks_usec() - stage_started;
 	}
 
 	auto live_matches = [&](const bool p_staged_live) {
@@ -585,11 +607,16 @@ Error Terrain3DCollision::rebuild_regions(const TypedArray<Vector2i> &p_region_l
 		return true;
 	};
 
+	uint64_t stage_started = Time::get_singleton()->get_ticks_usec();
 	for (const RegionalShape &shape : staged) {
 		PS->body_set_shape(_static_body_rid, shape.slot, shape.new_rid);
 		PS->body_set_shape_transform(_static_body_rid, shape.slot, shape.new_transform);
 	}
-	if (!live_matches(true)) {
+	publication_usec = Time::get_singleton()->get_ticks_usec() - stage_started;
+	stage_started = Time::get_singleton()->get_ticks_usec();
+	const bool published_matches = live_matches(true);
+	verification_usec = Time::get_singleton()->get_ticks_usec() - stage_started;
+	if (!published_matches) {
 		for (const RegionalShape &shape : staged) {
 			PS->body_set_shape(_static_body_rid, shape.slot, shape.old_rid);
 			PS->body_set_shape_transform(_static_body_rid, shape.slot, shape.old_transform);
@@ -600,20 +627,44 @@ Error Terrain3DCollision::rebuild_regions(const TypedArray<Vector2i> &p_region_l
 		return ERR_INVALID_DATA;
 	}
 
+	stage_started = Time::get_singleton()->get_ticks_usec();
 	for (const RegionalShape &shape : staged) {
 		PS->free_rid(shape.old_rid);
 	}
+	retirement_usec = Time::get_singleton()->get_ticks_usec() - stage_started;
 	TypedArray<Vector2i> rebuilt;
 	for (const Vector2i &location : normalized) {
 		rebuilt.push_back(location);
 	}
 	_last_rebuilt_regions = rebuilt;
 	_last_regional_rebuild_usec = Time::get_singleton()->get_ticks_usec() - started;
+	_last_regional_rebuild_stage_usec = Dictionary();
+	_last_regional_rebuild_stage_usec["preflight"] = preflight_usec;
+	_last_regional_rebuild_stage_usec["height_data"] = height_data_usec;
+	_last_regional_rebuild_stage_usec["shape_staging"] = shape_staging_usec;
+	_last_regional_rebuild_stage_usec["publication"] = publication_usec;
+	_last_regional_rebuild_stage_usec["verification"] = verification_usec;
+	_last_regional_rebuild_stage_usec["retirement"] = retirement_usec;
+	_last_regional_rebuild_stage_usec["total"] = _last_regional_rebuild_usec;
 	return OK;
 }
 
 TypedArray<Vector2i> Terrain3DCollision::get_last_rebuilt_regions() const {
 	return TypedArray<Vector2i>(_last_rebuilt_regions.duplicate());
+}
+
+Dictionary Terrain3DCollision::get_last_regional_rebuild_stage_usec() const {
+	Dictionary stages = _last_regional_rebuild_stage_usec.duplicate();
+	if (stages.is_empty()) {
+		stages["preflight"] = 0;
+		stages["height_data"] = 0;
+		stages["shape_staging"] = 0;
+		stages["publication"] = 0;
+		stages["verification"] = 0;
+		stages["retirement"] = 0;
+		stages["total"] = 0;
+	}
+	return stages;
 }
 
 void Terrain3DCollision::destroy() {
@@ -775,6 +826,7 @@ void Terrain3DCollision::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("rebuild_regions", "region_locations"), &Terrain3DCollision::rebuild_regions);
 	ClassDB::bind_method(D_METHOD("get_last_rebuilt_regions"), &Terrain3DCollision::get_last_rebuilt_regions);
 	ClassDB::bind_method(D_METHOD("get_last_regional_rebuild_usec"), &Terrain3DCollision::get_last_regional_rebuild_usec);
+	ClassDB::bind_method(D_METHOD("get_last_regional_rebuild_stage_usec"), &Terrain3DCollision::get_last_regional_rebuild_stage_usec);
 	ClassDB::bind_method(D_METHOD("destroy"), &Terrain3DCollision::destroy);
 	ClassDB::bind_method(D_METHOD("set_mode", "mode"), &Terrain3DCollision::set_mode);
 	ClassDB::bind_method(D_METHOD("get_mode"), &Terrain3DCollision::get_mode);

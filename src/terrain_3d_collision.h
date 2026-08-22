@@ -51,6 +51,7 @@ private:
 	TypedArray<Vector2i> _full_game_region_locations;
 	TypedArray<Vector2i> _last_rebuilt_regions;
 	uint64_t _last_regional_rebuild_usec = 0;
+	Dictionary _last_regional_rebuild_stage_usec;
 
 	Vector2i _snap_to_grid(const Vector2i &p_pos) const;
 	Vector2i _snap_to_grid(const Vector3 &p_pos) const;
@@ -74,6 +75,7 @@ public:
 	Error rebuild_regions(const TypedArray<Vector2i> &p_region_locations);
 	TypedArray<Vector2i> get_last_rebuilt_regions() const;
 	uint64_t get_last_regional_rebuild_usec() const { return _last_regional_rebuild_usec; }
+	Dictionary get_last_regional_rebuild_stage_usec() const;
 	void destroy();
 
 	void set_mode(const CollisionMode p_mode);
