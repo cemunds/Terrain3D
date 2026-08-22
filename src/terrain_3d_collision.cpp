@@ -8,6 +8,7 @@
 #include <godot_cpp/classes/scene_tree.hpp>
 
 #include <algorithm>
+#include <cstring>
 
 #include "constants.h"
 #include "logger.h"
@@ -118,6 +119,109 @@ Dictionary Terrain3DCollision::_get_shape_data(const Vector2i &p_position, const
 	shape_data["depth"] = hshape_size;
 	shape_data["heights"] = map_data;
 	shape_data["xform"] = xform;
+	shape_data["min_height"] = min_height;
+	shape_data["max_height"] = max_height;
+	return shape_data;
+}
+
+// Calculates full-region shape data through the sanitized FORMAT_RF image storage.
+// Regional rebuilds are always aligned to one complete region, so they do not need the
+// per-sample division, modulo, region selection, and Image::get_pixel() calls required
+// by the generic dynamic-collision path above.
+Dictionary Terrain3DCollision::_get_region_shape_data(const Vector2i &p_region_location) {
+	IS_DATA_INIT_MESG("Terrain not initialized", Dictionary());
+	Terrain3DData *data = _terrain->get_data();
+	const int region_size = _terrain->get_region_size();
+	const int hshape_size = region_size + 1;
+
+	Ref<Terrain3DRegion> owner = data->get_region(p_region_location);
+	if (owner.is_null() || owner->is_deleted()) {
+		return Dictionary();
+	}
+	Ref<Image> map = owner->get_map(TYPE_HEIGHT);
+	Ref<Image> cmap = owner->get_map(TYPE_CONTROL);
+	if (map.is_null() || cmap.is_null() || map->get_format() != Image::FORMAT_RF || cmap->get_format() != Image::FORMAT_RF ||
+		map->get_width() != region_size || map->get_height() != region_size || cmap->get_width() != region_size ||
+		cmap->get_height() != region_size) {
+		return Dictionary();
+	}
+
+	Ref<Image> map_x, map_z, map_xz;
+	Ref<Image> cmap_x, cmap_z, cmap_xz;
+	auto load_neighbour = [&](const Vector2i &p_offset, Ref<Image> &r_height, Ref<Image> &r_control) {
+		Ref<Terrain3DRegion> region = data->get_region(p_region_location + p_offset);
+		if (region.is_valid() && !region->is_deleted()) {
+			r_height = region->get_map(TYPE_HEIGHT);
+			r_control = region->get_map(TYPE_CONTROL);
+		}
+	};
+	load_neighbour(Vector2i(1, 0), map_x, cmap_x);
+	load_neighbour(Vector2i(0, 1), map_z, cmap_z);
+	load_neighbour(Vector2i(1, 1), map_xz, cmap_xz);
+
+	const uint8_t *owner_heights = map->ptr();
+	const uint8_t *owner_controls = cmap->ptr();
+	const uint8_t *x_heights = map_x.is_valid() ? map_x->ptr() : nullptr;
+	const uint8_t *x_controls = cmap_x.is_valid() ? cmap_x->ptr() : nullptr;
+	const uint8_t *z_heights = map_z.is_valid() ? map_z->ptr() : nullptr;
+	const uint8_t *z_controls = cmap_z.is_valid() ? cmap_z->ptr() : nullptr;
+	const uint8_t *xz_heights = map_xz.is_valid() ? map_xz->ptr() : nullptr;
+	const uint8_t *xz_controls = cmap_xz.is_valid() ? cmap_xz->ptr() : nullptr;
+
+	PackedRealArray shape_heights;
+	shape_heights.resize(hshape_size * hshape_size);
+	real_t *destination = shape_heights.ptrw();
+	real_t min_height = FLT_MAX;
+	real_t max_height = FLT_MIN;
+	bool has_infinite_height = false;
+	auto read_float = [](const uint8_t *p_bytes, const int p_source_index) {
+		float value;
+		std::memcpy(&value, p_bytes + p_source_index * sizeof(float), sizeof(float));
+		return value;
+	};
+	auto write_sample = [&](const int p_x, const int p_z, const uint8_t *p_heights, const uint8_t *p_controls, const int p_source_index) {
+		const float control = read_float(p_controls, p_source_index);
+		const real_t height = is_hole(control) ? NAN : read_float(p_heights, p_source_index);
+		destination[hshape_size - 1 - p_z + p_x * hshape_size] = height;
+		has_infinite_height = has_infinite_height || std::isinf(height);
+		if (!std::isnan(height)) {
+			min_height = MIN(min_height, height);
+			max_height = MAX(max_height, height);
+		}
+	};
+
+	for (int x = 0; x < region_size; x++) {
+		for (int z = 0; z < region_size; z++) {
+			write_sample(x, z, owner_heights, owner_controls, z * region_size + x);
+		}
+	}
+	for (int z = 0; z < region_size; z++) {
+		const int source_index = z * region_size + (x_heights && x_controls ? 0 : region_size - 1);
+		write_sample(region_size, z,
+			x_heights && x_controls ? x_heights : owner_heights,
+			x_heights && x_controls ? x_controls : owner_controls, source_index);
+	}
+	for (int x = 0; x < region_size; x++) {
+		const int source_index = (z_heights && z_controls ? 0 : region_size - 1) * region_size + x;
+		write_sample(x, region_size,
+			z_heights && z_controls ? z_heights : owner_heights,
+			z_heights && z_controls ? z_controls : owner_controls, source_index);
+	}
+	const bool has_diagonal = xz_heights && xz_controls;
+	write_sample(region_size, region_size,
+		has_diagonal ? xz_heights : owner_heights,
+		has_diagonal ? xz_controls : owner_controls,
+		has_diagonal ? 0 : region_size * region_size - 1);
+	if (has_infinite_height) {
+		return Dictionary();
+	}
+
+	Dictionary shape_data;
+	shape_data["width"] = hshape_size;
+	shape_data["depth"] = hshape_size;
+	shape_data["heights"] = shape_heights;
+	shape_data["xform"] = Transform3D(Basis(Vector3(0, 1.0, 0), Math_PI * .5),
+		v2iv3(p_region_location * region_size + V2I(region_size / 2)));
 	shape_data["min_height"] = min_height;
 	shape_data["max_height"] = max_height;
 	return shape_data;
@@ -546,20 +650,13 @@ Error Terrain3DCollision::rebuild_regions(const TypedArray<Vector2i> &p_region_l
 		preflight_usec += Time::get_singleton()->get_ticks_usec() - stage_started;
 
 		stage_started = Time::get_singleton()->get_ticks_usec();
-		Dictionary shape_data = _get_shape_data(location * region_size, region_size);
+		Dictionary shape_data = _get_region_shape_data(location);
 		const int expected_dimension = region_size + 1;
 		if (!shape_data.has("width") || !shape_data.has("depth") || !shape_data.has("heights") || !shape_data.has("xform") ||
 			int(shape_data["width"]) != expected_dimension || int(shape_data["depth"]) != expected_dimension ||
 			PackedRealArray(shape_data["heights"]).size() != expected_dimension * expected_dimension) {
 			free_staged();
 			return ERR_INVALID_DATA;
-		}
-		const PackedRealArray heights = shape_data["heights"];
-		for (int height_index = 0; height_index < heights.size(); height_index++) {
-			if (std::isinf(heights[height_index])) {
-				free_staged();
-				return ERR_INVALID_DATA;
-			}
 		}
 		Transform3D transform = shape_data["xform"];
 		transform.scale(Vector3(spacing, 1.f, spacing));

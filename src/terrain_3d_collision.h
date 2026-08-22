@@ -56,6 +56,7 @@ private:
 	Vector2i _snap_to_grid(const Vector2i &p_pos) const;
 	Vector2i _snap_to_grid(const Vector3 &p_pos) const;
 	Dictionary _get_shape_data(const Vector2i &p_position, const int p_size);
+	Dictionary _get_region_shape_data(const Vector2i &p_region_location);
 	bool _shape_data_matches(const Dictionary &p_expected, const Variant &p_actual) const;
 
 	void _shape_set_disabled(const int p_shape_id, const bool p_disabled);
