@@ -6,6 +6,7 @@
 #include <godot_cpp/classes/collision_shape3d.hpp>
 #include <godot_cpp/classes/physics_material.hpp>
 #include <godot_cpp/classes/static_body3d.hpp>
+#include <godot_cpp/variant/typed_array.hpp>
 #include <vector>
 
 #include "constants.h"
@@ -47,10 +48,14 @@ private:
 
 	bool _initialized = false;
 	Vector2i _last_snapped_pos = V2I_MAX;
+	TypedArray<Vector2i> _full_game_region_locations;
+	TypedArray<Vector2i> _last_rebuilt_regions;
+	uint64_t _last_regional_rebuild_usec = 0;
 
 	Vector2i _snap_to_grid(const Vector2i &p_pos) const;
 	Vector2i _snap_to_grid(const Vector3 &p_pos) const;
 	Dictionary _get_shape_data(const Vector2i &p_position, const int p_size);
+	bool _shape_data_matches(const Dictionary &p_expected, const Variant &p_actual) const;
 
 	void _shape_set_disabled(const int p_shape_id, const bool p_disabled);
 	void _shape_set_transform(const int p_shape_id, const Transform3D &p_xform);
@@ -66,6 +71,9 @@ public:
 
 	void build();
 	void update(const bool p_rebuild = false);
+	Error rebuild_regions(const TypedArray<Vector2i> &p_region_locations);
+	TypedArray<Vector2i> get_last_rebuilt_regions() const;
+	uint64_t get_last_regional_rebuild_usec() const { return _last_regional_rebuild_usec; }
 	void destroy();
 
 	void set_mode(const CollisionMode p_mode);

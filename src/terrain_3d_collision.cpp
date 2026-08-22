@@ -7,6 +7,8 @@
 
 #include <godot_cpp/classes/scene_tree.hpp>
 
+#include <algorithm>
+
 #include "constants.h"
 #include "logger.h"
 #include "terrain_3d.h"
@@ -119,6 +121,35 @@ Dictionary Terrain3DCollision::_get_shape_data(const Vector2i &p_position, const
 	shape_data["min_height"] = min_height;
 	shape_data["max_height"] = max_height;
 	return shape_data;
+}
+
+bool Terrain3DCollision::_shape_data_matches(const Dictionary &p_expected, const Variant &p_actual) const {
+	if (p_actual.get_type() != Variant::DICTIONARY) {
+		return false;
+	}
+	Dictionary actual = p_actual;
+	static const StringName scalar_keys[] = { "width", "depth" };
+	for (const StringName &key : scalar_keys) {
+		if (!p_expected.has(key) || !actual.has(key) || p_expected[key] != actual[key]) {
+			return false;
+		}
+	}
+	if (!p_expected.has("heights") || !actual.has("heights")) {
+		return false;
+	}
+	PackedRealArray expected_heights = p_expected["heights"];
+	PackedRealArray actual_heights = actual["heights"];
+	if (expected_heights.size() != actual_heights.size()) {
+		return false;
+	}
+	for (int i = 0; i < expected_heights.size(); i++) {
+		const real_t expected = expected_heights[i];
+		const real_t observed = actual_heights[i];
+		if (!(std::isnan(expected) && std::isnan(observed)) && expected != observed) {
+			return false;
+		}
+	}
+	return true;
 }
 
 void Terrain3DCollision::_shape_set_disabled(const int p_shape_id, const bool p_disabled) {
@@ -281,6 +312,9 @@ void Terrain3DCollision::build() {
 
 	_initialized = true;
 	update();
+	if (_mode == FULL_GAME) {
+		_full_game_region_locations = TypedArray<Vector2i>(_terrain->get_data()->get_region_locations().duplicate());
+	}
 }
 
 void Terrain3DCollision::update(const bool p_rebuild) {
@@ -412,9 +446,180 @@ void Terrain3DCollision::update(const bool p_rebuild) {
 	LOG(EXTREME, "Collision update time: ", Time::get_singleton()->get_ticks_usec() - time, " us");
 }
 
+Error Terrain3DCollision::rebuild_regions(const TypedArray<Vector2i> &p_region_locations) {
+	const uint64_t started = Time::get_singleton()->get_ticks_usec();
+	if (_mode != FULL_GAME) {
+		return ERR_UNAVAILABLE;
+	}
+	if (!_initialized || !_terrain || !_static_body_rid.is_valid()) {
+		return ERR_UNCONFIGURED;
+	}
+	Terrain3DData *data = _terrain->get_data();
+	if (!data) {
+		return ERR_UNCONFIGURED;
+	}
+
+	TypedArray<Vector2i> active_locations = data->get_region_locations();
+	const int shape_count = PS->body_get_shape_count(_static_body_rid);
+	if (shape_count != active_locations.size()) {
+		return ERR_INVALID_DATA;
+	}
+	std::vector<RID> live_rids;
+	live_rids.reserve(shape_count);
+	for (int slot = 0; slot < shape_count; slot++) {
+		const RID rid = PS->body_get_shape(_static_body_rid, slot);
+		if (!rid.is_valid() || std::find(live_rids.begin(), live_rids.end(), rid) != live_rids.end()) {
+			return ERR_INVALID_DATA;
+		}
+		live_rids.push_back(rid);
+	}
+
+	std::vector<Vector2i> normalized;
+	normalized.reserve(p_region_locations.size());
+	for (int i = 0; i < p_region_locations.size(); i++) {
+		normalized.push_back(p_region_locations[i]);
+	}
+	std::sort(normalized.begin(), normalized.end(), [](const Vector2i &p_left, const Vector2i &p_right) {
+		return p_left.y == p_right.y ? p_left.x < p_right.x : p_left.y < p_right.y;
+	});
+	normalized.erase(std::unique(normalized.begin(), normalized.end()), normalized.end());
+	if (normalized.empty()) {
+		_last_rebuilt_regions = TypedArray<Vector2i>();
+		_last_regional_rebuild_usec = 0;
+		return OK;
+	}
+	if (active_locations != _full_game_region_locations) {
+		return ERR_INVALID_DATA;
+	}
+
+	struct RegionalShape {
+		Vector2i location;
+		int slot = -1;
+		RID old_rid;
+		Transform3D old_transform;
+		Dictionary old_data;
+		RID new_rid;
+		Transform3D new_transform;
+		Dictionary new_data;
+	};
+
+	std::vector<RegionalShape> staged;
+	staged.reserve(normalized.size());
+	auto free_staged = [&staged]() {
+		for (const RegionalShape &shape : staged) {
+			if (shape.new_rid.is_valid()) {
+				PS->free_rid(shape.new_rid);
+			}
+		}
+	};
+	const int region_size = _terrain->get_region_size();
+	const real_t spacing = _terrain->get_vertex_spacing();
+	for (const Vector2i &location : normalized) {
+		const int slot = active_locations.find(location);
+		Ref<Terrain3DRegion> region = data->get_region(location);
+		if (slot < 0 || slot >= shape_count || region.is_null() || region->is_deleted()) {
+			free_staged();
+			return ERR_INVALID_PARAMETER;
+		}
+		const RID old_rid = live_rids[slot];
+		const Variant old_data = PS->shape_get_data(old_rid);
+		if (!old_rid.is_valid() || old_data.get_type() != Variant::DICTIONARY) {
+			free_staged();
+			return ERR_INVALID_DATA;
+		}
+		Dictionary shape_data = _get_shape_data(location * region_size, region_size);
+		const int expected_dimension = region_size + 1;
+		if (!shape_data.has("width") || !shape_data.has("depth") || !shape_data.has("heights") || !shape_data.has("xform") ||
+			int(shape_data["width"]) != expected_dimension || int(shape_data["depth"]) != expected_dimension ||
+			PackedRealArray(shape_data["heights"]).size() != expected_dimension * expected_dimension) {
+			free_staged();
+			return ERR_INVALID_DATA;
+		}
+		const PackedRealArray heights = shape_data["heights"];
+		for (int height_index = 0; height_index < heights.size(); height_index++) {
+			if (std::isinf(heights[height_index])) {
+				free_staged();
+				return ERR_INVALID_DATA;
+			}
+		}
+		Transform3D transform = shape_data["xform"];
+		transform.scale(Vector3(spacing, 1.f, spacing));
+		if (!transform.is_finite()) {
+			free_staged();
+			return ERR_INVALID_DATA;
+		}
+		const Transform3D old_transform = PS->body_get_shape_transform(_static_body_rid, slot);
+		if (old_transform != transform) {
+			free_staged();
+			return ERR_INVALID_DATA;
+		}
+
+		RID replacement = PS->heightmap_shape_create();
+		if (!replacement.is_valid()) {
+			free_staged();
+			return ERR_CANT_CREATE;
+		}
+		staged.push_back({ location, slot, old_rid, old_transform, old_data,
+						   replacement, transform, shape_data });
+		PS->shape_set_data(replacement, shape_data);
+		if (PS->shape_get_type(replacement) != PhysicsServer3D::SHAPE_HEIGHTMAP || !_shape_data_matches(shape_data, PS->shape_get_data(replacement))) {
+			free_staged();
+			return ERR_INVALID_DATA;
+		}
+	}
+
+	auto live_matches = [&](const bool p_staged_live) {
+		if (PS->body_get_shape_count(_static_body_rid) != shape_count) {
+			return false;
+		}
+		for (const RegionalShape &shape : staged) {
+			const RID expected_rid = p_staged_live ? shape.new_rid : shape.old_rid;
+			const Transform3D expected_transform = p_staged_live ? shape.new_transform : shape.old_transform;
+			const Dictionary expected_data = p_staged_live ? shape.new_data : shape.old_data;
+			const RID observed_rid = PS->body_get_shape(_static_body_rid, shape.slot);
+			if (observed_rid != expected_rid || PS->body_get_shape_transform(_static_body_rid, shape.slot) != expected_transform ||
+				!_shape_data_matches(expected_data, PS->shape_get_data(observed_rid))) {
+				return false;
+			}
+		}
+		return true;
+	};
+
+	for (const RegionalShape &shape : staged) {
+		PS->body_set_shape(_static_body_rid, shape.slot, shape.new_rid);
+		PS->body_set_shape_transform(_static_body_rid, shape.slot, shape.new_transform);
+	}
+	if (!live_matches(true)) {
+		for (const RegionalShape &shape : staged) {
+			PS->body_set_shape(_static_body_rid, shape.slot, shape.old_rid);
+			PS->body_set_shape_transform(_static_body_rid, shape.slot, shape.old_transform);
+		}
+		const bool restored = live_matches(false);
+		CRASH_COND_MSG(!restored, "Regional collision rollback failed; refusing to expose mixed live collision");
+		free_staged();
+		return ERR_INVALID_DATA;
+	}
+
+	for (const RegionalShape &shape : staged) {
+		PS->free_rid(shape.old_rid);
+	}
+	TypedArray<Vector2i> rebuilt;
+	for (const Vector2i &location : normalized) {
+		rebuilt.push_back(location);
+	}
+	_last_rebuilt_regions = rebuilt;
+	_last_regional_rebuild_usec = Time::get_singleton()->get_ticks_usec() - started;
+	return OK;
+}
+
+TypedArray<Vector2i> Terrain3DCollision::get_last_rebuilt_regions() const {
+	return TypedArray<Vector2i>(_last_rebuilt_regions.duplicate());
+}
+
 void Terrain3DCollision::destroy() {
 	_initialized = false;
 	_last_snapped_pos = V2I_MAX;
+	_full_game_region_locations = TypedArray<Vector2i>();
 
 	// Physics Server
 	if (_static_body_rid.is_valid()) {
@@ -567,6 +772,9 @@ void Terrain3DCollision::_bind_methods() {
 
 	ClassDB::bind_method(D_METHOD("build"), &Terrain3DCollision::build);
 	ClassDB::bind_method(D_METHOD("update", "rebuild"), &Terrain3DCollision::update, DEFVAL(false));
+	ClassDB::bind_method(D_METHOD("rebuild_regions", "region_locations"), &Terrain3DCollision::rebuild_regions);
+	ClassDB::bind_method(D_METHOD("get_last_rebuilt_regions"), &Terrain3DCollision::get_last_rebuilt_regions);
+	ClassDB::bind_method(D_METHOD("get_last_regional_rebuild_usec"), &Terrain3DCollision::get_last_regional_rebuild_usec);
 	ClassDB::bind_method(D_METHOD("destroy"), &Terrain3DCollision::destroy);
 	ClassDB::bind_method(D_METHOD("set_mode", "mode"), &Terrain3DCollision::set_mode);
 	ClassDB::bind_method(D_METHOD("get_mode"), &Terrain3DCollision::get_mode);
