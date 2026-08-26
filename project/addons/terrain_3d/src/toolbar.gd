@@ -23,6 +23,8 @@ const ICON_INSTANCER: String = "res://addons/terrain_3d/icons/multimesh.svg"
 var add_tool_group: ButtonGroup = ButtonGroup.new()
 var sub_tool_group: ButtonGroup = ButtonGroup.new()
 var buttons: Dictionary
+var _allowed_tools := PackedInt32Array()
+var _showing_add_buttons := true
 
 
 func _init() -> void:
@@ -137,14 +139,84 @@ func get_button(p_name: String) -> Button:
 	return buttons.get(p_name, null)
 
 
+func set_allowed_tools(tools: PackedInt32Array) -> void:
+	_allowed_tools = tools.duplicate()
+	_update_button_visibility()
+	var selected := add_tool_group.get_pressed_button()
+	if selected == null or not is_tool_allowed(selected.get_meta("Tool", Terrain3DEditor.TOOL_MAX)):
+		_select_first_allowed_tool()
+
+
+func is_tool_allowed(tool: int) -> bool:
+	return _allowed_tools.is_empty() or _allowed_tools.has(tool)
+
+
 func show_add_buttons(p_enable: bool) -> void:
+	_showing_add_buttons = p_enable
+	_update_button_visibility()
+
+
+func _update_button_visibility() -> void:
 	for button in add_tool_group.get_buttons():
-		button.visible = p_enable
+		button.visible = _showing_add_buttons and is_tool_allowed(button.get_meta("Tool"))
 	for button in sub_tool_group.get_buttons():
-		button.visible = !p_enable
+		button.visible = not _showing_add_buttons and is_tool_allowed(button.get_meta("Tool"))
+	_update_separator_visibility()
+
+
+func _update_separator_visibility() -> void:
+	if _allowed_tools.is_empty():
+		for child in get_children():
+			if child is HSeparator:
+				child.visible = true
+		return
+	var seen_visible_button := false
+	var pending_separators: Array[Control] = []
+	for child in get_children():
+		if child is HSeparator:
+			pending_separators.append(child)
+		elif child is BaseButton and child.visible:
+			for separator in pending_separators:
+				separator.visible = seen_visible_button
+			pending_separators.clear()
+			seen_visible_button = true
+	for separator in pending_separators:
+		separator.visible = false
+
+
+func _select_first_allowed_tool() -> void:
+	for button in add_tool_group.get_buttons():
+		if is_tool_allowed(button.get_meta("Tool", Terrain3DEditor.TOOL_MAX)):
+			select_tool_button(button.name)
+			return
+
+
+func select_tool_button(button_name: String) -> bool:
+	var button := get_button(button_name)
+	if button == null:
+		return false
+	return _select_tool_button(button)
+
+
+func select_tool(tool: int, operation: int) -> bool:
+	for button in add_tool_group.get_buttons() + sub_tool_group.get_buttons():
+		if button.get_meta("Tool") == tool and button.get_meta("Operation") == operation:
+			return _select_tool_button(button)
+	return false
+
+
+func _select_tool_button(button: BaseButton) -> bool:
+	if not is_tool_allowed(button.get_meta("Tool")):
+		return false
+	for grouped_button in button.get_button_group().get_buttons():
+		grouped_button.set_pressed_no_signal(grouped_button == button)
+	_on_tool_selected(button)
+	return true
 
 
 func _on_tool_selected(p_button: BaseButton) -> void:
+	if not is_tool_allowed(p_button.get_meta("Tool", Terrain3DEditor.TOOL_MAX)):
+		return
 	# Select same tool on negative bar
 	var group: ButtonGroup = p_button.get_button_group()
 	var change_group: ButtonGroup = add_tool_group if group == sub_tool_group else sub_tool_group

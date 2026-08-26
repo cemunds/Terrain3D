@@ -113,6 +113,12 @@ func _edit(p_object: Object) -> void:
 		_clear()
 
 	if p_object is Terrain3D:
+		var allowed_tools := PackedInt32Array()
+		if p_object.has_meta("_terrain3d_editor_allowed_tools"):
+			var configured_tools: Variant = p_object.get_meta("_terrain3d_editor_allowed_tools")
+			if configured_tools is PackedInt32Array:
+				allowed_tools = configured_tools
+		ui.set_allowed_tools(allowed_tools)
 		if p_object == terrain:
 			return
 		terrain = p_object
@@ -146,6 +152,7 @@ func _edit(p_object: Object) -> void:
 
 	
 func _clear() -> void:
+	ui.set_allowed_tools(PackedInt32Array())
 	if is_terrain_valid():
 		if terrain.data.region_map_changed.is_connected(update_region_grid):
 			terrain.data.region_map_changed.disconnect(update_region_grid)
@@ -345,32 +352,36 @@ func consume_hotkey(keycode: int) -> bool:
 		KEY_5, KEY_KP_5:
 			terrain.material.set_show_vertex_grid(!terrain.material.get_show_vertex_grid())
 		KEY_E:
-			ui.toolbar.get_button("AddRegion").set_pressed(true)
+			return _select_tool_button("AddRegion")
 		KEY_R:
-			ui.toolbar.get_button("Raise").set_pressed(true)
+			return _select_tool_button("Raise")
 		KEY_H:
-			ui.toolbar.get_button("Height").set_pressed(true)
+			return _select_tool_button("Height")
 		KEY_S:
-			ui.toolbar.get_button("Slope").set_pressed(true)
+			return _select_tool_button("Slope")
 		KEY_C:
-			ui.toolbar.get_button("PaintColor").set_pressed(true)
+			return _select_tool_button("PaintColor")
 		KEY_N:
-			ui.toolbar.get_button("PaintNavigableArea").set_pressed(true)
+			return _select_tool_button("PaintNavigableArea")
 		KEY_I:
-			ui.toolbar.get_button("InstanceMeshes").set_pressed(true)
+			return _select_tool_button("InstanceMeshes")
 		KEY_X:
-			ui.toolbar.get_button("AddHoles").set_pressed(true)
+			return _select_tool_button("AddHoles")
 		KEY_W:
-			ui.toolbar.get_button("PaintWetness").set_pressed(true)
+			return _select_tool_button("PaintWetness")
 		KEY_B:
-			ui.toolbar.get_button("PaintTexture").set_pressed(true)
+			return _select_tool_button("PaintTexture")
 		KEY_V:
-			ui.toolbar.get_button("SprayTexture").set_pressed(true)
+			return _select_tool_button("SprayTexture")
 		KEY_A:
-			ui.toolbar.get_button("PaintAutoshader").set_pressed(true)
+			return _select_tool_button("PaintAutoshader")
 		_:
 			return false
 	return true
+
+
+func _select_tool_button(button_name: String) -> bool:
+	return ui.toolbar.select_tool_button(button_name)
 
 
 func update_region_grid() -> void:

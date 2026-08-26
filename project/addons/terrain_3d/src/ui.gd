@@ -148,9 +148,13 @@ func set_menu_visibility(p_list: Control, p_visible: bool) -> void:
 		p_list.get_parent().get_parent().visible = p_visible
 	
 
+func set_allowed_tools(tools: PackedInt32Array) -> void:
+	toolbar.set_allowed_tools(tools)
+
+
 func _on_tool_changed(p_tool: Terrain3DEditor.Tool, p_operation: Terrain3DEditor.Operation) -> void:
-	_selected_tool = p_tool
-	_selected_operation = p_operation
+	if not _apply_tool_selection(p_tool, p_operation):
+		return
 	clear_picking()
 	set_menu_visibility(tool_settings.advanced_list, true)
 	set_menu_visibility(tool_settings.scale_list, false)
@@ -271,6 +275,17 @@ func _on_tool_changed(p_tool: Terrain3DEditor.Tool, p_operation: Terrain3DEditor
 	plugin.update_region_grid()
 
 
+func _apply_tool_selection(
+	p_tool: Terrain3DEditor.Tool, p_operation: Terrain3DEditor.Operation
+) -> bool:
+	if not toolbar.is_tool_allowed(p_tool):
+		toolbar.select_tool(_selected_tool, _selected_operation)
+		return false
+	_selected_tool = p_tool
+	_selected_operation = p_operation
+	return true
+
+
 func _on_setting_changed(p_setting: Variant = null) -> void:
 	if not plugin.asset_dock: # Skip function if not _ready()
 		return
@@ -296,7 +311,7 @@ func set_active_operation() -> void:
 	toolbar.show_add_buttons(not inverted)
 	
 	# If Shift, Smoothness 
-	if plugin.modifier_shift and not inverted:
+	if plugin.modifier_shift and not inverted and toolbar.is_tool_allowed(Terrain3DEditor.SCULPT):
 		active_tool = Terrain3DEditor.SCULPT
 		active_operation = Terrain3DEditor.AVERAGE	
 	
@@ -527,6 +542,8 @@ func set_decal_rotation(p_rot: float) -> void:
 
 
 func _on_picking(p_type: Terrain3DEditor.Tool, p_callback: Callable) -> void:
+	if not toolbar.is_tool_allowed(p_type):
+		return
 	picking = p_type
 	picking_callback = p_callback
 	update_decal()
