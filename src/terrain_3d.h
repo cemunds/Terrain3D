@@ -92,6 +92,10 @@ private:
 	Camera3D *_mouse_cam = nullptr;
 	MeshInstance3D *_mouse_quad = nullptr;
 	uint32_t _mouse_layer = 32;
+	uint64_t _gpu_intersection_state_generation = 0;
+	int64_t _pending_gpu_intersection_request_id = 0;
+	Vector3 _pending_gpu_intersection_camera_origin;
+	Vector3 _pending_gpu_intersection_direction;
 
 	// Parent containers for child nodes
 	Node3D *_label_parent;
@@ -112,6 +116,9 @@ private:
 
 	void _setup_mouse_picking();
 	void _destroy_mouse_picking();
+	void _clear_pending_gpu_intersection();
+	Vector3 _read_gpu_intersection(const Vector3 &p_camera_origin, const Vector3 &p_direction) const;
+	void _queue_gpu_intersection(const Vector3 &p_src_pos, const Vector3 &p_direction);
 
 	void _generate_triangles(PackedVector3Array &p_vertices, PackedVector2Array *p_uvs, const int32_t p_lod,
 							 const Terrain3DData::HeightFilter p_filter, const bool require_nav, const AABB &p_global_aabb) const;
@@ -187,6 +194,8 @@ public:
 
 	// Utility
 	Vector3 get_intersection(const Vector3 &p_src_pos, const Vector3 &p_direction, const bool p_gpu_mode = false);
+	bool request_gpu_intersection(const int64_t p_request_id, const Vector3 &p_src_pos, const Vector3 &p_direction);
+	void cancel_gpu_intersection_requests();
 	Ref<Mesh> bake_mesh(const int p_lod, const Terrain3DData::HeightFilter p_filter = Terrain3DData::HEIGHT_FILTER_NEAREST) const;
 	PackedVector3Array generate_nav_mesh_source_geometry(const AABB &p_global_aabb, const bool p_require_nav = true) const;
 

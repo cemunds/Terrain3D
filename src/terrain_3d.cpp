@@ -265,12 +265,59 @@ void Terrain3D::_setup_mouse_picking() {
 }
 
 void Terrain3D::_destroy_mouse_picking() {
+	cancel_gpu_intersection_requests();
 	LOG(DEBUG, "Freeing mouse_quad");
 	memdelete_safely(_mouse_quad);
 	LOG(DEBUG, "Freeing mouse_cam");
 	memdelete_safely(_mouse_cam);
 	LOG(DEBUG, "Freeing mouse_vp");
 	memdelete_safely(_mouse_vp);
+}
+
+void Terrain3D::_clear_pending_gpu_intersection() {
+	_gpu_intersection_state_generation++;
+	_pending_gpu_intersection_request_id = 0;
+	_pending_gpu_intersection_camera_origin = Vector3();
+	_pending_gpu_intersection_direction = Vector3();
+}
+
+Vector3 Terrain3D::_read_gpu_intersection(const Vector3 &p_camera_origin, const Vector3 &p_direction) const {
+	if (!_mouse_vp) {
+		return Vector3(NAN, NAN, NAN);
+	}
+	Ref<ViewportTexture> vp_tex = _mouse_vp->get_texture();
+	if (vp_tex.is_null()) {
+		return Vector3(NAN, NAN, NAN);
+	}
+	Ref<Image> vp_img = vp_tex->get_image();
+	if (vp_img.is_null() || vp_img->is_empty()) {
+		return Vector3(NAN, NAN, NAN);
+	}
+
+	Color screen_depth = vp_img->get_pixel(0, 0);
+	real_t r = floor((screen_depth.r * 256.0) - 128.0);
+	real_t g = floor((screen_depth.g * 256.0) - 128.0);
+	real_t b = floor((screen_depth.b * 256.0) - 128.0);
+	real_t decoded_depth = (r + g / 127.0 + b / (127.0 * 127.0)) / 127.0;
+	if (decoded_depth < 0.00001f) {
+		return V3_MAX;
+	}
+	if (decoded_depth >= 0.99999f) {
+		return V3_MAX;
+	}
+	decoded_depth *= _mouse_cam->get_far();
+	return p_camera_origin + p_direction * decoded_depth;
+}
+
+void Terrain3D::_queue_gpu_intersection(const Vector3 &p_src_pos, const Vector3 &p_direction) {
+	Vector3 camera_origin = p_src_pos - p_direction;
+	_mouse_cam->set_global_position(camera_origin);
+	if ((p_direction - Vector3(0.f, -1.f, 0.f)).length_squared() < 0.00001f) {
+		_mouse_cam->set_rotation_degrees(Vector3(-90.f, 0.f, 0.f));
+	} else {
+		_mouse_cam->look_at(camera_origin + p_direction, Vector3(0.f, 1.f, 0.f));
+	}
+	_mouse_vp->set_update_mode(SubViewport::UPDATE_ONCE);
 }
 
 void Terrain3D::_generate_triangles(PackedVector3Array &p_vertices, PackedVector2Array *p_uvs, const int32_t p_lod,
@@ -738,6 +785,50 @@ Vector3 Terrain3D::get_intersection(const Vector3 &p_src_pos, const Vector3 &p_d
 	return point;
 }
 
+bool Terrain3D::request_gpu_intersection(const int64_t p_request_id, const Vector3 &p_src_pos, const Vector3 &p_direction) {
+	if (p_request_id <= 0 || !p_src_pos.is_finite() || !p_direction.is_finite() || p_direction.is_zero_approx()) {
+		return false;
+	}
+	if (p_request_id == _pending_gpu_intersection_request_id) {
+		return false;
+	}
+	if (!is_instance_valid(_camera_instance_id) || !_mouse_cam || !_mouse_vp) {
+		return false;
+	}
+
+	Vector3 direction = p_direction.normalized();
+	if (_pending_gpu_intersection_request_id > 0) {
+		const int64_t completed_request_id = _pending_gpu_intersection_request_id;
+		const Vector3 completed_camera_origin = _pending_gpu_intersection_camera_origin;
+		const Vector3 completed_direction = _pending_gpu_intersection_direction;
+		_clear_pending_gpu_intersection();
+		const uint64_t completed_generation = _gpu_intersection_state_generation;
+		const Vector3 point = _read_gpu_intersection(completed_camera_origin, completed_direction);
+		const uint64_t self_id = get_instance_id();
+		emit_signal("gpu_intersection_ready", completed_request_id, point);
+		if (ObjectDB::get_instance(self_id) != this) {
+			return false;
+		}
+		if (!is_instance_valid(_camera_instance_id) || !_mouse_cam || !_mouse_vp) {
+			return false;
+		}
+		if (_gpu_intersection_state_generation != completed_generation) {
+			return false;
+		}
+	}
+
+	_pending_gpu_intersection_request_id = p_request_id;
+	_pending_gpu_intersection_camera_origin = p_src_pos - direction;
+	_pending_gpu_intersection_direction = direction;
+	_gpu_intersection_state_generation++;
+	_queue_gpu_intersection(p_src_pos, direction);
+	return true;
+}
+
+void Terrain3D::cancel_gpu_intersection_requests() {
+	_clear_pending_gpu_intersection();
+}
+
 /**
  * Generates a static ArrayMesh for the terrain.
  * p_lod (0-8): Determines the granularity of the generated mesh.
@@ -1116,6 +1207,8 @@ void Terrain3D::_bind_methods() {
 
 	// Utility
 	ClassDB::bind_method(D_METHOD("get_intersection", "src_pos", "direction", "gpu_mode"), &Terrain3D::get_intersection, DEFVAL(false));
+	ClassDB::bind_method(D_METHOD("request_gpu_intersection", "request_id", "source_position", "direction"), &Terrain3D::request_gpu_intersection);
+	ClassDB::bind_method(D_METHOD("cancel_gpu_intersection_requests"), &Terrain3D::cancel_gpu_intersection_requests);
 	ClassDB::bind_method(D_METHOD("bake_mesh", "lod", "filter"), &Terrain3D::bake_mesh, DEFVAL(Terrain3DData::HEIGHT_FILTER_NEAREST));
 	ClassDB::bind_method(D_METHOD("generate_nav_mesh_source_geometry", "global_aabb", "require_nav"), &Terrain3D::generate_nav_mesh_source_geometry, DEFVAL(true));
 
@@ -1185,4 +1278,5 @@ void Terrain3D::_bind_methods() {
 
 	ADD_SIGNAL(MethodInfo("material_changed"));
 	ADD_SIGNAL(MethodInfo("assets_changed"));
+	ADD_SIGNAL(MethodInfo("gpu_intersection_ready", PropertyInfo(Variant::INT, "request_id"), PropertyInfo(Variant::VECTOR3, "position")));
 }

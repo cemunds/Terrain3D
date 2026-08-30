@@ -19,6 +19,12 @@
 				[code skip-lint]filter[/code] - Controls how vertex Y coordinates are generated from the height map. See [enum Terrain3DData.HeightFilter].
 			</description>
 		</method>
+		<method name="cancel_gpu_intersection_requests">
+			<return type="void" />
+			<description>
+				Clears the request queued by [method request_gpu_intersection]. The cancelled request will not emit [signal gpu_intersection_ready], even if its viewport image has already rendered. The next valid request primes the viewport without reading that stale image.
+			</description>
+		</method>
 		<method name="generate_nav_mesh_source_geometry" qualifiers="const">
 			<return type="PackedVector3Array" />
 			<param index="0" name="global_aabb" type="AABB" />
@@ -81,6 +87,19 @@
 			<return type="Vector3" />
 			<description>
 				Returns the last position the terrain was centered on.
+			</description>
+		</method>
+		<method name="request_gpu_intersection">
+			<return type="bool" />
+			<param index="0" name="request_id" type="int" />
+			<param index="1" name="source_position" type="Vector3" />
+			<param index="2" name="direction" type="Vector3" />
+			<description>
+				Queues an asynchronous GPU terrain intersection while preserving the request's ray. The first valid request primes the GPU viewport and emits nothing. After the viewport has rendered, a subsequent valid request reads the prior image using the prior request's saved origin and normalized direction, emits [signal gpu_intersection_ready] for that prior request, and then queues itself.
+
+				Returns [code skip-lint]false[/code] without changing the pending request when [code skip-lint]request_id[/code] is not positive, duplicates the pending ID, either vector is non-finite, [code skip-lint]direction[/code] is zero, or the GPU picker is unavailable. It also returns [code skip-lint]false[/code] without queueing itself when a completion callback cancels, queues another request, or tears down the picker; callback-side state takes precedence. Call at most once per rendered frame. Use [method cancel_gpu_intersection_requests] when the consumer no longer wants the pending result.
+
+				The emitted position uses the established [code skip-lint]Vector3(FLT_MAX, FLT_MAX, FLT_MAX)[/code] no-intersection sentinel for near-zero or clear far-plane depth, and a non-finite value on error. This method is additive; it does not change the legacy continuous-call behavior of [method get_intersection].
 			</description>
 		</method>
 		<method name="set_camera">
@@ -271,6 +290,13 @@
 		<signal name="material_changed">
 			<description>
 				Emitted when [member material] is changed.
+			</description>
+		</signal>
+		<signal name="gpu_intersection_ready">
+			<param index="0" name="request_id" type="int" />
+			<param index="1" name="position" type="Vector3" />
+			<description>
+				Emitted exactly once when a queued asynchronous GPU intersection is completed by a later valid request. The ID and position both belong to the completed prior request.
 			</description>
 		</signal>
 	</signals>
